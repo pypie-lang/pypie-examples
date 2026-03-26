@@ -14,11 +14,9 @@ from pypie import (
     op,
     iota,
     larger,
-    smaller,
     randn,
     rep,
     sqrt,
-    f16,
     cast,
 )
 
