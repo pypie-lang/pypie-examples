@@ -8,6 +8,7 @@ from pypie import (
     op,
     rand,
     Tensor,
+    f32,
     larger,
 )
 from libs.linear import linear, LinearParams
@@ -16,7 +17,7 @@ from libs.corr2d import corr2d_multi_in_out, pool2d, Corr2dParams
 
 lr = 0.1
 
-t = float
+t = f32
 
 
 class LeNetParams:
