@@ -128,6 +128,15 @@ class LeNetGraphParams:
         self.linear3_b = linear3_b
 
 
+class VmapModule(nn.Module):
+    def __init__(self, module: nn.Module) -> None:
+        super().__init__()
+        self.module = module
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.vmap(self.module)(x)
+
+
 def build_linear_graph_module(
     A: nn.Parameter,
     b: nn.Parameter | None = None,
@@ -152,6 +161,15 @@ def build_linear_graph_module(
     graph.lint()
     return GraphModule(root, graph, "MyLinear")
 
+def batched_view(g, x, to_shape):
+    from_shape = g.call_function(getattr, args=(x, "shape"))
+    to_shape = tuple(to_shape)
+    batch_shape = g.call_function(
+        operator.getitem,
+        args=(from_shape, slice(None, None if not to_shape else -len(to_shape))),
+    )
+    shape = g.call_function(operator.add, args=(batch_shape, to_shape))
+    return g.call_method("view", args=(x, shape))
 
 def build_conv2d_graph_module(
     w: nn.Parameter,
@@ -174,21 +192,19 @@ def build_conv2d_graph_module(
     graph = Graph()
     x = graph.placeholder("x")
     x_shape = graph.call_function(getattr, args=(x, "shape"))
-    batch_size_node = graph.call_function(operator.getitem, args=(x_shape, 0))
-    height = graph.call_function(operator.getitem, args=(x_shape, 2))
-    width = graph.call_function(operator.getitem, args=(x_shape, 3))
+    height = graph.call_function(operator.getitem, args=(x_shape, -2))
+    width = graph.call_function(operator.getitem, args=(x_shape, -1))
+    x = graph.call_method("unsqueeze", args=(x, -4))
 
     patches = graph.call_function(
         F.unfold,
         args=(x, kernel_size),
         kwargs={"dilation": 1, "padding": padding, "stride": stride},
     )
+    patches = graph.call_method("squeeze", args=(patches, 0))
     w = graph.get_attr("w")
     weight = graph.call_method("view", args=(w, out_channels, -1))
-    y = graph.call_method("transpose", args=(patches, 1, 2))
-    weight_t = graph.call_method("transpose", args=(weight, 0, 1))
-    y = graph.call_method("matmul", args=(y, weight_t))
-    y = graph.call_method("transpose", args=(y, 1, 2))
+    y = graph.call_method("matmul", args=(weight, patches))
 
     pad_h, pad_w = padding
     kernel_h, kernel_w = kernel_size
@@ -204,11 +220,11 @@ def build_conv2d_graph_module(
 
     y = graph.call_method(
         "view",
-        args=(y, batch_size_node, out_channels, out_h, out_w),
+        args=(y, out_channels, out_h, out_w),
     )
     if root.b is not None:
         b = graph.get_attr("b")
-        bias_view = graph.call_method("view", args=(b, 1, -1, 1, 1))
+        bias_view = graph.call_method("view", args=(b, -1, 1, 1))
         y = graph.call_function(operator.add, args=(y, bias_view))
     graph.output(y)
     graph.lint()
@@ -241,15 +257,15 @@ def build_avg_pool2d_graph_module(
 
     kernel_h, kernel_w = kernel_size
     stride_h, stride_w = stride
-    y = graph.call_method("unfold", args=(x, 2, kernel_h, stride_h))
-    y = graph.call_method("unfold", args=(y, 3, kernel_w, stride_w))
-    graph.output(graph.call_method("mean", args=(y, (4, 5))))
+    y = graph.call_method("unfold", args=(x, -2, kernel_h, stride_h))
+    y = graph.call_method("unfold", args=(y, -2, kernel_w, stride_w))
+    graph.output(graph.call_method("mean", args=(y, (-2, -1))))
     graph.lint()
     return GraphModule(nn.Module(), graph, "MyAvgPool2d")
 
 
 def build_flatten_graph_module(
-    start_dim: int = 1,
+    start_dim: int = 0,
     end_dim: int = -1,
 ) -> GraphModule:
     graph = Graph()
@@ -261,13 +277,13 @@ def build_flatten_graph_module(
 
 def build_lenet_graph_module(params: LeNetGraphParams) -> GraphModule:
     root = nn.Module()
-    root.conv1 = build_conv2d_graph_module(params.conv1_w, params.conv1_b, padding=2)
+    root.conv1 = VmapModule(build_conv2d_graph_module(params.conv1_w, params.conv1_b, padding=2))
     root.relu1 = build_relu_graph_module()
     root.pool1 = build_avg_pool2d_graph_module(kernel_size=2, stride=2)
-    root.conv2 = build_conv2d_graph_module(params.conv2_w, params.conv2_b)
+    root.conv2 = VmapModule(build_conv2d_graph_module(params.conv2_w, params.conv2_b))
     root.relu2 = build_relu_graph_module()
     root.pool2 = build_avg_pool2d_graph_module(kernel_size=2, stride=2)
-    root.flatten = build_flatten_graph_module()
+    root.flatten = build_flatten_graph_module(1, -1)
     root.linear1 = build_linear_graph_module(params.linear1_A, params.linear1_b)
     root.relu3 = build_relu_graph_module()
     root.linear2 = build_linear_graph_module(params.linear2_A, params.linear2_b)
